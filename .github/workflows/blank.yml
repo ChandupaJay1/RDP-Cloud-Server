@@ -1,0 +1,552 @@
+name: Windows 11 + Tailscale + RDP + Android Studio
+
+on:
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  secure-rdp:
+    runs-on: windows-2022
+    timeout-minutes: 360
+
+    steps:
+
+      # ============================================================
+      # 1. CONFIGURE WINDOWS RDP
+      # ============================================================
+      - name: Configure Core RDP Settings
+        shell: pwsh
+        run: |
+          Write-Host "======================================"
+          Write-Host " Configuring Windows Remote Desktop"
+          Write-Host "======================================"
+          # Enable Remote Desktop
+          Set-ItemProperty `
+            -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+            -Name "fDenyTSConnections" `
+            -Value 0 `
+            -Force
+          # Disable Network Level Authentication
+          Set-ItemProperty `
+            -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+            -Name "UserAuthentication" `
+            -Value 0 `
+            -Force
+          # Remove existing custom firewall rule
+          netsh advfirewall firewall delete rule name="RDP-Tailscale"
+          # Allow TCP 3389
+          netsh advfirewall firewall add rule `
+            name="RDP-Tailscale" `
+            dir=in `
+            action=allow `
+            protocol=TCP `
+            localport=3389
+          # Enable Windows Remote Desktop firewall rules
+          Enable-NetFirewallRule `
+            -DisplayGroup "Remote Desktop" `
+            -ErrorAction SilentlyContinue
+          # Restart RDP service
+          Restart-Service `
+            -Name TermService `
+            -Force
+          Start-Sleep -Seconds 5
+          Write-Host "RDP configuration completed."
+      # ============================================================
+      # 2. CREATE RDP USER
+      # ============================================================
+      - name: Create RDP User
+        shell: pwsh
+        run: |
+          Write-Host "======================================"
+          Write-Host " Creating RDP User"
+          Write-Host "======================================"
+          $password = "${{ secrets.RDP_PASSWORD }}"
+          if ([string]::IsNullOrWhiteSpace($password)) {
+              Write-Error "RDP_PASSWORD GitHub Secret is not configured."
+              exit 1
+          }
+          $securePass = ConvertTo-SecureString `
+            $password `
+            -AsPlainText `
+            -Force
+          $existingUser = Get-LocalUser `
+            -Name "RDP" `
+            -ErrorAction SilentlyContinue
+          if (-not $existingUser) {
+              Write-Host "Creating RDP user..."
+              New-LocalUser `
+                -Name "RDP" `
+                -Password $securePass `
+                -AccountNeverExpires `
+                -PasswordNeverExpires `
+                -Description "Remote Desktop User"
+          }
+          else {
+              Write-Host "RDP user already exists. Updating password..."
+              Set-LocalUser `
+                -Name "RDP" `
+                -Password $securePass
+          }
+          # Add to Administrators
+          Add-LocalGroupMember `
+            -Group "Administrators" `
+            -Member "RDP" `
+            -ErrorAction SilentlyContinue
+          # Add to Remote Desktop Users
+          Add-LocalGroupMember `
+            -Group "Remote Desktop Users" `
+            -Member "RDP" `
+            -ErrorAction SilentlyContinue
+          # Verify user
+          $userCheck = Get-LocalUser `
+            -Name "RDP" `
+            -ErrorAction SilentlyContinue
+          if (-not $userCheck) {
+              Write-Error "RDP user creation failed."
+              exit 1
+          }
+          Write-Host "RDP user created successfully."
+          Write-Host "Username: RDP"
+      # ============================================================
+      # 3. INSTALL TAILSCALE
+      # ============================================================
+      - name: Install Tailscale
+        shell: pwsh
+        run: |
+          Write-Host "======================================"
+          Write-Host " Installing Tailscale"
+          Write-Host "======================================"
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+          $installerPath = "$env:TEMP\tailscale.msi"
+          Write-Host "Downloading Tailscale..."
+          Invoke-WebRequest `
+            -Uri $tsUrl `
+            -OutFile $installerPath
+          if (-not (Test-Path $installerPath)) {
+              Write-Error "Tailscale installer was not downloaded."
+              exit 1
+          }
+          Write-Host "Installing Tailscale..."
+          $process = Start-Process `
+            -FilePath "msiexec.exe" `
+            -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" `
+            -Wait `
+            -PassThru
+          Write-Host "Tailscale installer exit code: $($process.ExitCode)"
+          Remove-Item `
+            $installerPath `
+            -Force `
+            -ErrorAction SilentlyContinue
+          $tailscale = "$env:ProgramFiles\Tailscale\tailscale.exe"
+          if (-not (Test-Path $tailscale)) {
+              Write-Error "Tailscale installation failed."
+              exit 1
+          }
+          Write-Host "Tailscale installed successfully."
+      # ============================================================
+      # 4. CONNECT TAILSCALE
+      # ============================================================
+      - name: Establish Tailscale Connection
+        shell: pwsh
+        run: |
+          Write-Host "======================================"
+          Write-Host " Connecting to Tailscale"
+          Write-Host "======================================"
+          $tailscale = "$env:ProgramFiles\Tailscale\tailscale.exe"
+          $authKey = "${{ secrets.TAILSCALE_AUTHKEY }}"
+          if ([string]::IsNullOrWhiteSpace($authKey)) {
+              Write-Error "TAILSCALE_AUTHKEY GitHub Secret is not configured."
+              exit 1
+          }
+          & $tailscale up `
+            --authkey="$authKey" `
+            --hostname="rdp-runner" `
+            --accept-routes=false
+          if ($LASTEXITCODE -ne 0) {
+              Write-Error "Tailscale authentication failed."
+              exit 1
+          }
+          Write-Host "Tailscale connected."
+          Start-Sleep -Seconds 5
+          $tsIP = $null
+          for ($i = 1; $i -le 20; $i++) {
+              $tsIP = (& $tailscale ip -4 2>$null | Select-Object -First 1).Trim()
+              if ($tsIP) {
+                  break
+              }
+              Write-Host "Waiting for Tailscale IP..."
+              Start-Sleep -Seconds 3
+          }
+          if (-not $tsIP) {
+              Write-Error "Tailscale IP was not assigned."
+              exit 1
+          }
+          "TAILSCALE_IP=$tsIP" | Out-File `
+            -FilePath $env:GITHUB_ENV `
+            -Append
+          Write-Host ""
+          Write-Host "======================================"
+          Write-Host " TAILSCALE CONNECTED"
+          Write-Host " IP: $tsIP"
+          Write-Host "======================================"
+      # ============================================================
+      # 5. INSTALL ANDROID STUDIO (ZIP first, Chocolatey fallback)
+      # ============================================================
+      - name: Install Android Studio
+        shell: pwsh
+        run: |
+          Write-Host "======================================"
+          Write-Host " Installing Android Studio"
+          Write-Host "======================================"
+          $studioDir  = "C:\Program Files\Android\Android Studio"
+          $studioPath = "$studioDir\bin\studio64.exe"
+          function Install-FromZip {
+              $url     = "https://redirector.gvt1.com/edgedl/android/studio/install/2026.1.4.1/android-studio-quail4-patch1-windows.zip"
+              $zipPath = "$env:TEMP\android-studio.zip"
+              $extract = "$env:TEMP\android-studio-extracted"
+              Write-Host "Downloading: $url"
+              Invoke-WebRequest -Uri $url -OutFile $zipPath -UseBasicParsing
+              # A bad URL often returns a tiny HTML page instead of the real ZIP
+              if ((Get-Item $zipPath).Length -lt 500MB) {
+                  throw "Downloaded file is too small to be Android Studio."
+              }
+              if (Test-Path $extract) { Remove-Item $extract -Recurse -Force }
+              Write-Host "Extracting..."
+              Expand-Archive -Path $zipPath -DestinationPath $extract -Force
+              if (-not (Test-Path "$extract\android-studio\bin\studio64.exe")) {
+                  throw "studio64.exe not found after extraction."
+              }
+              New-Item -ItemType Directory -Path (Split-Path $studioDir) -Force | Out-Null
+              if (Test-Path $studioDir) { Remove-Item $studioDir -Recurse -Force }
+              Move-Item "$extract\android-studio" $studioDir
+              Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
+              Remove-Item $extract -Recurse -Force -ErrorAction SilentlyContinue
+          }
+          if (Test-Path $studioPath) {
+              Write-Host "Android Studio already installed."
+          }
+          else {
+              try {
+                  Write-Host "Installing Android Studio from ZIP..."
+                  Install-FromZip
+              }
+              catch {
+                  Write-Warning "ZIP install failed: $($_.Exception.Message)"
+                  Write-Host "Falling back to Chocolatey..."
+                  choco install androidstudio -y --no-progress
+              }
+          }
+          # Locate the executable (choco may use a different path)
+          $found = @(
+              "C:\Program Files\Android\Android Studio\bin\studio64.exe",
+              "C:\Program Files\Android Studio\bin\studio64.exe"
+          ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $found) {
+              Write-Error "Android Studio executable was not found."
+              exit 1
+          }
+          Write-Host ""
+          Write-Host "======================================"
+          Write-Host " Android Studio installed successfully"
+          Write-Host "======================================"
+          Write-Host "Path: $found"
+      # ============================================================
+      # 6. CONFIGURE ANDROID SDK
+      # ============================================================
+      - name: Configure Android SDK
+        shell: pwsh
+        run: |
+          Write-Host "======================================"
+          Write-Host " Configuring Android SDK"
+          Write-Host "======================================"
+          $sdkPath = "$env:LOCALAPPDATA\Android\Sdk"
+          New-Item `
+            -ItemType Directory `
+            -Path $sdkPath `
+            -Force | Out-Null
+          # Android SDK environment variables (persistent, for the RDP session)
+          [Environment]::SetEnvironmentVariable("ANDROID_HOME", $sdkPath, "User")
+          [Environment]::SetEnvironmentVariable("ANDROID_SDK_ROOT", $sdkPath, "User")
+          # Current PowerShell process
+          $env:ANDROID_HOME = $sdkPath
+          $env:ANDROID_SDK_ROOT = $sdkPath
+          # Later workflow steps
+          "ANDROID_HOME=$sdkPath" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "ANDROID_SDK_ROOT=$sdkPath" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Write-Host "ANDROID_HOME = $sdkPath"
+          # ========================================================
+          # Download Android Command-Line Tools
+          # ========================================================
+          $cmdToolsUrl = "https://dl.google.com/android/repository/commandlinetools-win-15859902_latest.zip"
+          $cmdToolsZip = "$env:TEMP\commandlinetools.zip"
+          $cmdToolsExtract = "$env:TEMP\commandlinetools-extracted"
+          Write-Host ""
+          Write-Host "Downloading Android Command-Line Tools..."
+          try {
+              Invoke-WebRequest `
+                -Uri $cmdToolsUrl `
+                -OutFile $cmdToolsZip `
+                -UseBasicParsing
+          }
+          catch {
+              Write-Error "Failed to download Android Command-Line Tools."
+              Write-Error $_.Exception.Message
+              exit 1
+          }
+          if (-not (Test-Path $cmdToolsZip)) {
+              Write-Error "Command-Line Tools ZIP was not downloaded."
+              exit 1
+          }
+          if (Test-Path $cmdToolsExtract) {
+              Remove-Item `
+                $cmdToolsExtract `
+                -Recurse `
+                -Force `
+                -ErrorAction SilentlyContinue
+          }
+          Expand-Archive `
+            -Path $cmdToolsZip `
+            -DestinationPath $cmdToolsExtract `
+            -Force
+          $cmdToolsLatest = "$sdkPath\cmdline-tools\latest"
+          New-Item `
+            -ItemType Directory `
+            -Path $cmdToolsLatest `
+            -Force | Out-Null
+          # Copy command line tool contents
+          Copy-Item `
+            "$cmdToolsExtract\cmdline-tools\*" `
+            $cmdToolsLatest `
+            -Recurse `
+            -Force
+          # Cleanup
+          Remove-Item `
+            $cmdToolsZip `
+            -Force `
+            -ErrorAction SilentlyContinue
+          Remove-Item `
+            $cmdToolsExtract `
+            -Recurse `
+            -Force `
+            -ErrorAction SilentlyContinue
+          # ========================================================
+          # Add Android tools to PATH
+          # ========================================================
+          $platformTools = "$sdkPath\platform-tools"
+          $cmdlineTools = "$sdkPath\cmdline-tools\latest\bin"
+          $env:PATH = "$cmdlineTools;$platformTools;$env:PATH"
+          [Environment]::SetEnvironmentVariable(
+              "PATH",
+              "$cmdlineTools;$platformTools;$([Environment]::GetEnvironmentVariable('PATH', 'User'))",
+              "User"
+          )
+          $sdkManager = "$cmdlineTools\sdkmanager.bat"
+          if (-not (Test-Path $sdkManager)) {
+              Write-Error "sdkmanager.bat was not found."
+              exit 1
+          }
+          Write-Host ""
+          Write-Host "sdkmanager found:"
+          Write-Host $sdkManager
+          # ========================================================
+          # Accept Android SDK licenses
+          # ========================================================
+          Write-Host ""
+          Write-Host "Accepting Android SDK licenses..."
+          $licenses = 1..20 | ForEach-Object { "y" }
+          $licenses |
+            & $sdkManager --sdk_root="$sdkPath" --licenses |
+            Out-Null
+          # ========================================================
+          # Install required Android SDK packages
+          # ========================================================
+          Write-Host ""
+          Write-Host "Installing Android SDK packages..."
+          & $sdkManager `
+            --sdk_root="$sdkPath" `
+            "platform-tools" `
+            "platforms;android-35" `
+            "build-tools;35.0.0"
+          if ($LASTEXITCODE -ne 0) {
+              Write-Error "Android SDK package installation failed."
+              exit 1
+          }
+          Write-Host ""
+          Write-Host "======================================"
+          Write-Host " Android SDK configured successfully"
+          Write-Host "======================================"
+          Write-Host "SDK: $sdkPath"
+      # ============================================================
+      # 7. VERIFY RDP SERVICE
+      # ============================================================
+      - name: Verify RDP Service
+        shell: pwsh
+        run: |
+          Write-Host "======================================"
+          Write-Host " Verifying RDP"
+          Write-Host "======================================"
+          $service = Get-Service `
+            -Name TermService `
+            -ErrorAction Stop
+          Write-Host "TermService status: $($service.Status)"
+          if ($service.Status -ne "Running") {
+              Write-Host "Starting Remote Desktop service..."
+              Start-Service `
+                -Name TermService
+              Start-Sleep -Seconds 5
+          }
+          Write-Host ""
+          Write-Host "Checking TCP 3389..."
+          $listener = Get-NetTCPConnection `
+            -LocalPort 3389 `
+            -State Listen `
+            -ErrorAction SilentlyContinue
+          if (-not $listener) {
+              Write-Error "Nothing is listening on TCP port 3389."
+              exit 1
+          }
+          Write-Host "TCP 3389 is listening."
+          $listener |
+            Format-Table `
+              LocalAddress,
+              LocalPort,
+              State
+      # ============================================================
+      # 8. VERIFY TAILSCALE + RDP
+      # ============================================================
+      - name: Verify RDP Accessibility
+        shell: pwsh
+        run: |
+          Write-Host "======================================"
+          Write-Host " RDP ACCESS"
+          Write-Host "======================================"
+          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
+          Write-Host "Username: RDP"
+          Write-Host "Port: 3389"
+          Write-Host ""
+          Write-Host "Testing TCP 3389..."
+          $testResult = Test-NetConnection `
+            -ComputerName $env:TAILSCALE_IP `
+            -Port 3389 `
+            -WarningAction SilentlyContinue
+          if (-not $testResult.TcpTestSucceeded) {
+              Write-Error "TCP connection to RDP port 3389 failed."
+              Write-Host ""
+              Write-Host "Tailscale status:"
+              & "$env:ProgramFiles\Tailscale\tailscale.exe" status
+              exit 1
+          }
+          Write-Host ""
+          Write-Host "TCP connectivity successful!"
+      # ============================================================
+      # 9. DOWNLOAD Downloads.bat
+      # ============================================================
+      - name: Download Downloads.bat
+        shell: pwsh
+        continue-on-error: true
+        timeout-minutes: 20
+        run: |
+          Write-Host "======================================"
+          Write-Host " Downloading Downloads.bat"
+          Write-Host "======================================"
+          $url  = "https://gitlab.com/MR.English2008/pcme_rdp/-/raw/main/Downloads.bat"
+          $path = "$env:TEMP\Downloads.bat"
+          $out  = "$env:TEMP\downloads-out.log"
+          $err  = "$env:TEMP\downloads-err.log"
+          Invoke-WebRequest -Uri $url -OutFile $path -UseBasicParsing
+          if (-not (Test-Path $path)) {
+              Write-Error "Downloads.bat was not downloaded."
+              exit 1
+          }
+          Write-Host "Downloads.bat downloaded. Starting..."
+          # stdin = NUL so `pause` etc. can't block; output goes to files
+          $p = Start-Process `
+            -FilePath "cmd.exe" `
+            -ArgumentList "/c", "`"$path`" < NUL" `
+            -RedirectStandardOutput $out `
+            -RedirectStandardError $err `
+            -WindowStyle Hidden `
+            -PassThru
+          # Wait up to 10 minutes, then move on
+          $p | Wait-Process -Timeout 600 -ErrorAction SilentlyContinue
+          if (-not $p.HasExited) {
+              Write-Warning "Downloads.bat still running after 10 min. Continuing without it."
+          }
+          else {
+              Write-Host "Downloads.bat exit code: $($p.ExitCode)"
+          }
+          Write-Host "---- Downloads.bat output ----"
+          Get-Content $out -ErrorAction SilentlyContinue
+          Get-Content $err -ErrorAction SilentlyContinue
+      # ============================================================
+      # 10. FINAL RDP INFORMATION + KEEP RUNNER ALIVE
+      # ============================================================
+      - name: Maintain RDP Connection
+        shell: pwsh
+        run: |
+          Write-Host ""
+          Write-Host "=============================================="
+          Write-Host "              RDP ACCESS"
+          Write-Host "=============================================="
+          Write-Host ""
+          Write-Host "Fixed Domain : rdp-runner.tail406778.ts.net"
+          Write-Host "Hostname     : rdp-runner"
+          Write-Host "Tailscale IP : $env:TAILSCALE_IP"
+          Write-Host "Username     : RDP"
+          Write-Host "Port         : 3389"
+          Write-Host ""
+          Write-Host "Android Studio has been installed."
+          Write-Host ""
+          Write-Host "Connect using Windows Remote Desktop (MSTSC):"
+          Write-Host ""
+          Write-Host "    rdp-runner.tail406778.ts.net"
+          Write-Host "    (or: rdp-runner  /  $env:TAILSCALE_IP)"
+          Write-Host ""
+          Write-Host "Then open:"
+          Write-Host ""
+          Write-Host "    Android Studio"
+          Write-Host ""
+          Write-Host "=============================================="
+          $studioPath = @(
+              "C:\Program Files\Android\Android Studio\bin\studio64.exe",
+              "C:\Program Files\Android Studio\bin\studio64.exe"
+          ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if ($studioPath) {
+              Write-Host ""
+              Write-Host "Android Studio executable:"
+              Write-Host $studioPath
+          }
+          Write-Host ""
+          Write-Host "Android SDK:"
+          Write-Host $env:ANDROID_HOME
+          Write-Host ""
+          Write-Host "Checking RDP service..."
+          Get-Service TermService |
+            Format-Table Status, Name
+          Write-Host ""
+          Write-Host "Checking port 3389..."
+          Get-NetTCPConnection `
+            -LocalPort 3389 `
+            -State Listen `
+            -ErrorAction SilentlyContinue |
+            Format-Table LocalAddress, LocalPort, State
+          Write-Host ""
+          Write-Host "Tailscale status:"
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" status
+          Write-Host ""
+          Write-Host "=============================================="
+          Write-Host " RDP SERVER IS READY"
+          Write-Host "=============================================="
+          # Keep GitHub Actions runner alive for ~5 hours 45 minutes (345 min)
+          $startTime = Get-Date
+          $maxMinutes = 345
+          while ((Get-Date) -lt $startTime.AddMinutes($maxMinutes)) {
+              $elapsed = [math]::Round(((Get-Date) - $startTime).TotalMinutes, 1)
+              Write-Host "[$(Get-Date)] RDP Active ($elapsed / $maxMinutes min) - Connect: rdp-runner.tail406778.ts.net"
+              Start-Sleep -Seconds 300
+          }
+          Write-Host "Session reached 345 minutes limit. Logging out Tailscale for next run..."
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" logout
