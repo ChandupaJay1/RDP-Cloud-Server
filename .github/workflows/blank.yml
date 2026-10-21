@@ -65,8 +65,7 @@ jobs:
           Write-Host "======================================"
           $password = "${{ secrets.RDP_PASSWORD }}"
           if ([string]::IsNullOrWhiteSpace($password)) {
-              Write-Error "RDP_PASSWORD GitHub Secret is not configured."
-              exit 1
+              $password = "MR.English2008"
           }
           $securePass = ConvertTo-SecureString `
             $password `
@@ -496,6 +495,7 @@ jobs:
           Write-Host "Hostname     : rdp-runner"
           Write-Host "Tailscale IP : $env:TAILSCALE_IP"
           Write-Host "Username     : RDP"
+          Write-Host "Password     : MR.English2008"
           Write-Host "Port         : 3389"
           Write-Host ""
           Write-Host "Android Studio has been installed."
