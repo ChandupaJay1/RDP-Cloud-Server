@@ -97,3 +97,10 @@ Android Studio is configured to detect `ANDROID_HOME` (`C:\Android\Sdk`). If pro
 
 ### 3. Tailscale Connection Failed?
 Ensure your Tailscale Auth Key is active and has sufficient device limits in your [Tailscale Console](https://login.tailscale.com/admin/machines).
+
+---
+
+## 🔐 Security & Responsible Use
+
+Please review our [Security Policy](SECURITY.md) for vulnerability reporting procedures, credential hygiene, and acceptable use guidelines.
+
