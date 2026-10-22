@@ -391,19 +391,19 @@ jobs:
           Write-Host "Configuring Android SDK licenses..."
           $licenseDir = "$sdkPath\licenses"
           New-Item -ItemType Directory -Path $licenseDir -Force | Out-Null
-          @"
-24333f8a63b6825ea9c5514f83c2829b004d1fee
-89338d0d9b1836777773a6c144e14e4ff9da0773
-d56f5187479451eabf01fb78af6dfcb131a6481e
-"@ | Set-Content -Path "$licenseDir\android-sdk-license" -Force -Encoding ASCII
+          @(
+              "24333f8a63b6825ea9c5514f83c2829b004d1fee"
+              "89338d0d9b1836777773a6c144e14e4ff9da0773"
+              "d56f5187479451eabf01fb78af6dfcb131a6481e"
+          ) | Set-Content -Path "$licenseDir\android-sdk-license" -Force -Encoding ASCII
 
-          @"
-84831b9409646a918e30573bab4c9c91346d8abd
-"@ | Set-Content -Path "$licenseDir\android-sdk-preview-license" -Force -Encoding ASCII
+          @(
+              "84831b9409646a918e30573bab4c9c91346d8abd"
+          ) | Set-Content -Path "$licenseDir\android-sdk-preview-license" -Force -Encoding ASCII
 
-          @"
-33b6a2b649200299fce170a4c085c966f7ad9457
-"@ | Set-Content -Path "$licenseDir\google-gdk-license" -Force -Encoding ASCII
+          @(
+              "33b6a2b649200299fce170a4c085c966f7ad9457"
+          ) | Set-Content -Path "$licenseDir\google-gdk-license" -Force -Encoding ASCII
 
           # Accept all interactive licenses
           cmd /c "echo y | `"$sdkManager`" --sdk_root=`"$sdkPath`" --licenses" | Out-Null
@@ -500,51 +500,51 @@ d56f5187479451eabf01fb78af6dfcb131a6481e
           New-Item -ItemType Directory -Path $startupFolder -Force | Out-Null
           $startupScript = Join-Path $startupFolder "setup-android-user.bat"
 
-          @"
-@echo off
-:: Automatically configure RDP user session for Android Studio & SDK
-if not exist "%LOCALAPPDATA%\Android" mkdir "%LOCALAPPDATA%\Android"
-if not exist "%LOCALAPPDATA%\Android\Sdk" mklink /J "%LOCALAPPDATA%\Android\Sdk" "C:\Android\Sdk" >nul 2>&1
-
-:: Ensure user-level environment variables match system variables
-setx ANDROID_HOME "C:\Android\Sdk" >nul 2>&1
-setx ANDROID_SDK_ROOT "C:\Android\Sdk" >nul 2>&1
-
-:: Disable usage statistics prompt
-if not exist "%USERPROFILE%\.android" mkdir "%USERPROFILE%\.android"
-echo [General] > "%USERPROFILE%\.android\analytics.settings"
-echo opt-in=false >> "%USERPROFILE%\.android\analytics.settings"
-"@ | Set-Content -Path $startupScript -Force -Encoding ASCII
+          @(
+              "@echo off"
+              ":: Automatically configure RDP user session for Android Studio & SDK"
+              'if not exist "%LOCALAPPDATA%\Android" mkdir "%LOCALAPPDATA%\Android"'
+              'if not exist "%LOCALAPPDATA%\Android\Sdk" mklink /J "%LOCALAPPDATA%\Android\Sdk" "C:\Android\Sdk" >nul 2>&1'
+              ""
+              ":: Ensure user-level environment variables match system variables"
+              'setx ANDROID_HOME "C:\Android\Sdk" >nul 2>&1'
+              'setx ANDROID_SDK_ROOT "C:\Android\Sdk" >nul 2>&1'
+              ""
+              ":: Disable usage statistics prompt"
+              'if not exist "%USERPROFILE%\.android" mkdir "%USERPROFILE%\.android"'
+              'echo [General] > "%USERPROFILE%\.android\analytics.settings"'
+              'echo opt-in=false >> "%USERPROFILE%\.android\analytics.settings"'
+          ) | Set-Content -Path $startupScript -Force -Encoding ASCII
 
           Write-Host "Configured user startup initialization script at: $startupScript"
 
           # Create a desktop test shortcut for the user
           $publicDesktop = "C:\Users\Public\Desktop"
           $testBat = Join-Path $publicDesktop "Test Android SDK.bat"
-          @"
-@echo off
-echo ============================================================
-echo           ANDROID ENVIRONMENT VERIFICATION
-echo ============================================================
-echo.
-echo ANDROID_HOME     : %ANDROID_HOME%
-echo ANDROID_SDK_ROOT : %ANDROID_SDK_ROOT%
-echo JAVA_HOME        : %JAVA_HOME%
-echo.
-echo --- Testing ADB (platform-tools) ---
-adb version
-echo.
-echo --- Testing SDK Manager ---
-call sdkmanager --version
-echo.
-echo --- Testing Java ---
-java -version
-echo.
-echo ============================================================
-echo If all tools above showed versions, setup is 100%% complete!
-echo ============================================================
-pause
-"@ | Set-Content -Path $testBat -Force -Encoding ASCII
+          @(
+              "@echo off"
+              "echo ============================================================"
+              "echo           ANDROID ENVIRONMENT VERIFICATION"
+              "echo ============================================================"
+              "echo."
+              "echo ANDROID_HOME     : %ANDROID_HOME%"
+              "echo ANDROID_SDK_ROOT : %ANDROID_SDK_ROOT%"
+              "echo JAVA_HOME        : %JAVA_HOME%"
+              "echo."
+              "echo --- Testing ADB (platform-tools) ---"
+              "adb version"
+              "echo."
+              "echo --- Testing SDK Manager ---"
+              "call sdkmanager --version"
+              "echo."
+              "echo --- Testing Java ---"
+              "java -version"
+              "echo."
+              "echo ============================================================"
+              "echo If all tools above showed versions, setup is 100%% complete!"
+              "echo ============================================================"
+              "pause"
+          ) | Set-Content -Path $testBat -Force -Encoding ASCII
 
           Write-Host "Created desktop verification utility at: $testBat"
 
