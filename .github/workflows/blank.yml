@@ -191,7 +191,7 @@ jobs:
           Write-Host " IP: $tsIP"
           Write-Host "======================================"
       # ============================================================
-      # 5. INSTALL ANDROID STUDIO (ZIP first, Chocolatey fallback)
+      # 5. INSTALL ANDROID STUDIO
       # ============================================================
       - name: Install Android Studio
         shell: pwsh
@@ -201,80 +201,111 @@ jobs:
           Write-Host "======================================"
           $studioDir  = "C:\Program Files\Android\Android Studio"
           $studioPath = "$studioDir\bin\studio64.exe"
-          function Install-FromZip {
-              $url     = "https://redirector.gvt1.com/edgedl/android/studio/install/2026.1.4.1/android-studio-quail4-patch1-windows.zip"
-              $zipPath = "$env:TEMP\android-studio.zip"
-              $extract = "$env:TEMP\android-studio-extracted"
-              Write-Host "Downloading: $url"
-              Invoke-WebRequest -Uri $url -OutFile $zipPath -UseBasicParsing
-              # A bad URL often returns a tiny HTML page instead of the real ZIP
-              if ((Get-Item $zipPath).Length -lt 500MB) {
-                  throw "Downloaded file is too small to be Android Studio."
-              }
-              if (Test-Path $extract) { Remove-Item $extract -Recurse -Force }
-              Write-Host "Extracting..."
-              Expand-Archive -Path $zipPath -DestinationPath $extract -Force
-              if (-not (Test-Path "$extract\android-studio\bin\studio64.exe")) {
-                  throw "studio64.exe not found after extraction."
-              }
-              New-Item -ItemType Directory -Path (Split-Path $studioDir) -Force | Out-Null
-              if (Test-Path $studioDir) { Remove-Item $studioDir -Recurse -Force }
-              Move-Item "$extract\android-studio" $studioDir
-              Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
-              Remove-Item $extract -Recurse -Force -ErrorAction SilentlyContinue
-          }
+
           if (Test-Path $studioPath) {
               Write-Host "Android Studio already installed."
           }
           else {
-              try {
-                  Write-Host "Installing Android Studio from ZIP..."
-                  Install-FromZip
-              }
-              catch {
-                  Write-Warning "ZIP install failed: $($_.Exception.Message)"
-                  Write-Host "Falling back to Chocolatey..."
-                  choco install androidstudio -y --no-progress
-              }
+              Write-Host "Installing Android Studio via Chocolatey..."
+              choco install androidstudio --package-parameters="/AddToDesktop" -y --no-progress
           }
-          # Locate the executable (choco may use a different path)
+
+          # Locate the executable (choco or default install)
           $found = @(
               "C:\Program Files\Android\Android Studio\bin\studio64.exe",
               "C:\Program Files\Android Studio\bin\studio64.exe"
           ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+
           if (-not $found) {
               Write-Error "Android Studio executable was not found."
               exit 1
           }
+
+          Write-Host "Android Studio found: $found"
+          $studioBinDir = Split-Path $found -Parent
+          $studioHomeDir = Split-Path $studioBinDir -Parent
+
+          # Disable Android Studio First-Run Wizard so it won't prompt to download/setup SDK
+          $ideaProps = Join-Path $studioBinDir "idea.properties"
+          if (Test-Path $ideaProps) {
+              $propsContent = Get-Content $ideaProps -Raw -ErrorAction SilentlyContinue
+              if ($propsContent -notmatch "disable\.android\.first\.run") {
+                  Write-Host "Disabling Android Studio first-run wizard in idea.properties..."
+                  Add-Content -Path $ideaProps -Value "`ndisable.android.first.run=true`n"
+              }
+          }
+
+          # Detect bundled JBR (JetBrains Runtime)
+          $jbrPath = Join-Path $studioHomeDir "jbr"
+          if (Test-Path "$jbrPath\bin\java.exe") {
+              Write-Host "Configuring bundled Java runtime (JBR): $jbrPath"
+              [Environment]::SetEnvironmentVariable("JAVA_HOME", $jbrPath, "Machine")
+              $env:JAVA_HOME = $jbrPath
+              "JAVA_HOME=$jbrPath" | Out-File -FilePath $env:GITHUB_ENV -Append
+          }
+
+          # Create Desktop Shortcut for all users (shows on RDP user's desktop)
+          $wscript = New-Object -ComObject WScript.Shell
+          $publicDesktop = "C:\Users\Public\Desktop"
+          if (-not (Test-Path $publicDesktop)) { New-Item -ItemType Directory -Path $publicDesktop -Force | Out-Null }
+          $shortcutPath = Join-Path $publicDesktop "Android Studio.lnk"
+          $shortcut = $wscript.CreateShortcut($shortcutPath)
+          $shortcut.TargetPath = $found
+          $shortcut.WorkingDirectory = $studioBinDir
+          $shortcut.Description = "Android Studio"
+          $shortcut.Save()
+          Write-Host "Created public desktop shortcut: $shortcutPath"
+
           Write-Host ""
           Write-Host "======================================"
           Write-Host " Android Studio installed successfully"
           Write-Host "======================================"
           Write-Host "Path: $found"
+
       # ============================================================
-      # 6. CONFIGURE ANDROID SDK
+      # 6. CONFIGURE ANDROID SDK & ENVIRONMENT VARIABLES
       # ============================================================
       - name: Configure Android SDK
         shell: pwsh
         run: |
           Write-Host "======================================"
-          Write-Host " Configuring Android SDK"
+          Write-Host " Configuring Android SDK & System Env"
           Write-Host "======================================"
-          $sdkPath = "$env:LOCALAPPDATA\Android\Sdk"
-          New-Item `
-            -ItemType Directory `
-            -Path $sdkPath `
-            -Force | Out-Null
-          # Android SDK environment variables (persistent, for the RDP session)
-          [Environment]::SetEnvironmentVariable("ANDROID_HOME", $sdkPath, "User")
-          [Environment]::SetEnvironmentVariable("ANDROID_SDK_ROOT", $sdkPath, "User")
+
+          # Universal SDK path accessible to all users (avoids runneradmin AppData isolation)
+          $sdkPath = "C:\Android\Sdk"
+          New-Item -ItemType Directory -Path $sdkPath -Force | Out-Null
+
+          # Grant full permissions to Everyone and Users so RDP user can read/write without issue
+          icacls "C:\Android" /grant "Everyone:(OI)(CI)F" /T /Q | Out-Null
+          icacls "C:\Android" /grant "Users:(OI)(CI)F" /T /Q | Out-Null
+
+          # Set SYSTEM-WIDE (Machine) environment variables so RDP user gets them automatically
+          [Environment]::SetEnvironmentVariable("ANDROID_HOME", $sdkPath, "Machine")
+          [Environment]::SetEnvironmentVariable("ANDROID_SDK_ROOT", $sdkPath, "Machine")
+
           # Current PowerShell process
           $env:ANDROID_HOME = $sdkPath
           $env:ANDROID_SDK_ROOT = $sdkPath
-          # Later workflow steps
+
+          # GitHub Actions step environment
           "ANDROID_HOME=$sdkPath" | Out-File -FilePath $env:GITHUB_ENV -Append
           "ANDROID_SDK_ROOT=$sdkPath" | Out-File -FilePath $env:GITHUB_ENV -Append
-          Write-Host "ANDROID_HOME = $sdkPath"
+
+          Write-Host "ANDROID_HOME     = $sdkPath (Machine)"
+          Write-Host "ANDROID_SDK_ROOT = $sdkPath (Machine)"
+
+          # Set into Default User registry so new Windows user profiles inherit it in HKCU as well
+          try {
+              reg load HKU\DefUser "C:\Users\Default\NTUSER.DAT" 2>$null
+              reg add "HKU\DefUser\Environment" /v ANDROID_HOME /t REG_SZ /d "$sdkPath" /f 2>$null
+              reg add "HKU\DefUser\Environment" /v ANDROID_SDK_ROOT /t REG_SZ /d "$sdkPath" /f 2>$null
+              reg unload HKU\DefUser 2>$null
+          }
+          catch {
+              Write-Host "Note: Default user profile registry update skipped ($($_.Exception.Message))"
+          }
+
           # ========================================================
           # Download Android Command-Line Tools
           # ========================================================
@@ -314,69 +345,220 @@ jobs:
             -ItemType Directory `
             -Path $cmdToolsLatest `
             -Force | Out-Null
+
           # Copy command line tool contents
           Copy-Item `
             "$cmdToolsExtract\cmdline-tools\*" `
             $cmdToolsLatest `
             -Recurse `
             -Force
+
           # Cleanup
-          Remove-Item `
-            $cmdToolsZip `
-            -Force `
-            -ErrorAction SilentlyContinue
-          Remove-Item `
-            $cmdToolsExtract `
-            -Recurse `
-            -Force `
-            -ErrorAction SilentlyContinue
+          Remove-Item $cmdToolsZip -Force -ErrorAction SilentlyContinue
+          Remove-Item $cmdToolsExtract -Recurse -Force -ErrorAction SilentlyContinue
+
           # ========================================================
-          # Add Android tools to PATH
+          # Ensure Java is available for sdkmanager
           # ========================================================
-          $platformTools = "$sdkPath\platform-tools"
-          $cmdlineTools = "$sdkPath\cmdline-tools\latest\bin"
-          $env:PATH = "$cmdlineTools;$platformTools;$env:PATH"
-          [Environment]::SetEnvironmentVariable(
-              "PATH",
-              "$cmdlineTools;$platformTools;$([Environment]::GetEnvironmentVariable('PATH', 'User'))",
-              "User"
-          )
-          $sdkManager = "$cmdlineTools\sdkmanager.bat"
+          if (-not $env:JAVA_HOME -or -not (Test-Path "$env:JAVA_HOME\bin\java.exe")) {
+              $possibleJavas = @(
+                  "C:\Program Files\Android\Android Studio\jbr",
+                  "C:\Program Files\Android Studio\jbr",
+                  "$env:JAVA_HOME_17_X64",
+                  "$env:JAVA_HOME_21_X64",
+                  "$env:JAVA_HOME_11_X64"
+              ) | Where-Object { $_ -and (Test-Path "$_\bin\java.exe") }
+              if ($possibleJavas.Count -gt 0) {
+                  $env:JAVA_HOME = $possibleJavas[0]
+                  [Environment]::SetEnvironmentVariable("JAVA_HOME", $env:JAVA_HOME, "Machine")
+                  "JAVA_HOME=$($env:JAVA_HOME)" | Out-File -FilePath $env:GITHUB_ENV -Append
+              }
+          }
+          Write-Host "Using JAVA_HOME: $env:JAVA_HOME"
+
+          $sdkManager = "$cmdToolsLatest\bin\sdkmanager.bat"
           if (-not (Test-Path $sdkManager)) {
-              Write-Error "sdkmanager.bat was not found."
+              Write-Error "sdkmanager.bat was not found at $sdkManager."
               exit 1
           }
           Write-Host ""
-          Write-Host "sdkmanager found:"
-          Write-Host $sdkManager
+          Write-Host "sdkmanager found: $sdkManager"
+
           # ========================================================
           # Accept Android SDK licenses
           # ========================================================
           Write-Host ""
-          Write-Host "Accepting Android SDK licenses..."
-          $licenses = 1..20 | ForEach-Object { "y" }
-          $licenses |
-            & $sdkManager --sdk_root="$sdkPath" --licenses |
-            Out-Null
+          Write-Host "Configuring Android SDK licenses..."
+          $licenseDir = "$sdkPath\licenses"
+          New-Item -ItemType Directory -Path $licenseDir -Force | Out-Null
+          @"
+24333f8a63b6825ea9c5514f83c2829b004d1fee
+89338d0d9b1836777773a6c144e14e4ff9da0773
+d56f5187479451eabf01fb78af6dfcb131a6481e
+"@ | Set-Content -Path "$licenseDir\android-sdk-license" -Force -Encoding ASCII
+
+          @"
+84831b9409646a918e30573bab4c9c91346d8abd
+"@ | Set-Content -Path "$licenseDir\android-sdk-preview-license" -Force -Encoding ASCII
+
+          @"
+33b6a2b649200299fce170a4c085c966f7ad9457
+"@ | Set-Content -Path "$licenseDir\google-gdk-license" -Force -Encoding ASCII
+
+          # Accept all interactive licenses
+          cmd /c "echo y | `"$sdkManager`" --sdk_root=`"$sdkPath`" --licenses" | Out-Null
+
           # ========================================================
           # Install required Android SDK packages
           # ========================================================
           Write-Host ""
-          Write-Host "Installing Android SDK packages..."
+          Write-Host "Installing Android SDK packages (platform-tools, platforms;android-35, build-tools;35.0.0)..."
           & $sdkManager `
             --sdk_root="$sdkPath" `
             "platform-tools" `
             "platforms;android-35" `
             "build-tools;35.0.0"
-          if ($LASTEXITCODE -ne 0) {
-              Write-Error "Android SDK package installation failed."
+
+          # Fallback check for platform-tools: ensure adb.exe is definitely installed!
+          $platformTools = "$sdkPath\platform-tools"
+          if (-not (Test-Path "$platformTools\adb.exe")) {
+              Write-Warning "platform-tools not found after sdkmanager, downloading directly from Google..."
+              $ptUrl = "https://dl.google.com/android/repository/platform-tools-latest-windows.zip"
+              $ptZip = "$env:TEMP\platform-tools.zip"
+              Invoke-WebRequest -Uri $ptUrl -OutFile $ptZip -UseBasicParsing
+              Expand-Archive -Path $ptZip -DestinationPath "$env:TEMP\pt-extract" -Force
+              if (Test-Path "$env:TEMP\pt-extract\platform-tools") {
+                  if (Test-Path $platformTools) { Remove-Item $platformTools -Recurse -Force -ErrorAction SilentlyContinue }
+                  Move-Item "$env:TEMP\pt-extract\platform-tools" $platformTools -Force
+              }
+              Remove-Item "$env:TEMP\pt-extract" -Recurse -Force -ErrorAction SilentlyContinue
+              Remove-Item $ptZip -Force -ErrorAction SilentlyContinue
+          }
+
+          if (Test-Path "$platformTools\adb.exe") {
+              Write-Host "adb.exe successfully verified: $platformTools\adb.exe"
+          } else {
+              Write-Error "Failed to install platform-tools."
               exit 1
           }
+
+          # ========================================================
+          # Add Android tools to SYSTEM-WIDE (Machine) PATH
+          # ========================================================
+          $cmdlineToolsBin = "$cmdToolsLatest\bin"
+          $emulator        = "$sdkPath\emulator"
+          $toolsBin        = "$sdkPath\tools\bin"
+          $tools           = "$sdkPath\tools"
+          $studioBin       = "C:\Program Files\Android\Android Studio\bin"
+          $jbrBin          = "$env:JAVA_HOME\bin"
+
+          $androidPaths = @(
+              $platformTools,
+              $cmdlineToolsBin,
+              $emulator,
+              $toolsBin,
+              $tools
+          )
+          if (Test-Path $studioBin) { $androidPaths += $studioBin }
+          if ($jbrBin -and (Test-Path $jbrBin)) { $androidPaths += $jbrBin }
+
+          # Update Machine PATH
+          $machinePath = [Environment]::GetEnvironmentVariable("PATH", "Machine")
+          $pathEntries = [System.Collections.Generic.List[string]]::new()
+          foreach ($p in $androidPaths) {
+              if (-not $pathEntries.Contains($p)) { $pathEntries.Add($p) }
+          }
+          foreach ($p in ($machinePath -split ';')) {
+              if ($p -and -not $pathEntries.Contains($p)) { $pathEntries.Add($p) }
+          }
+          $updatedMachinePath = $pathEntries -join ';'
+
+          [Environment]::SetEnvironmentVariable("PATH", $updatedMachinePath, "Machine")
+
+          # Update current process PATH & GitHub Environment PATH
+          $env:PATH = "$($androidPaths -join ';');$env:PATH"
+          foreach ($p in $androidPaths) {
+              $p | Out-File -FilePath $env:GITHUB_PATH -Append
+          }
+          Write-Host "Updated System (Machine) PATH with platform-tools and cmdline-tools."
+
+          # ========================================================
+          # Setup Directory Junctions & User Profile Automation
+          # ========================================================
+          # Junction for runneradmin
+          $adminLocal = "$env:LOCALAPPDATA\Android"
+          New-Item -ItemType Directory -Path $adminLocal -Force | Out-Null
+          if (-not (Test-Path "$adminLocal\Sdk")) {
+              cmd /c "mklink /J `"$adminLocal\Sdk`" `"$sdkPath`"" | Out-Null
+          }
+
+          # Auto-configure Startup script so when user 'RDP' logs in:
+          # 1. LocalAppData junction (%LOCALAPPDATA%\Android\Sdk -> C:\Android\Sdk) is created
+          # 2. User-level ANDROID_HOME and ANDROID_SDK_ROOT are synchronized
+          # 3. First-run analytics prompts are suppressed
+          $startupFolder = "C:\ProgramData\Microsoft\Windows\Start Menu\Programs\Startup"
+          New-Item -ItemType Directory -Path $startupFolder -Force | Out-Null
+          $startupScript = Join-Path $startupFolder "setup-android-user.bat"
+
+          @"
+@echo off
+:: Automatically configure RDP user session for Android Studio & SDK
+if not exist "%LOCALAPPDATA%\Android" mkdir "%LOCALAPPDATA%\Android"
+if not exist "%LOCALAPPDATA%\Android\Sdk" mklink /J "%LOCALAPPDATA%\Android\Sdk" "C:\Android\Sdk" >nul 2>&1
+
+:: Ensure user-level environment variables match system variables
+setx ANDROID_HOME "C:\Android\Sdk" >nul 2>&1
+setx ANDROID_SDK_ROOT "C:\Android\Sdk" >nul 2>&1
+
+:: Disable usage statistics prompt
+if not exist "%USERPROFILE%\.android" mkdir "%USERPROFILE%\.android"
+echo [General] > "%USERPROFILE%\.android\analytics.settings"
+echo opt-in=false >> "%USERPROFILE%\.android\analytics.settings"
+"@ | Set-Content -Path $startupScript -Force -Encoding ASCII
+
+          Write-Host "Configured user startup initialization script at: $startupScript"
+
+          # Create a desktop test shortcut for the user
+          $publicDesktop = "C:\Users\Public\Desktop"
+          $testBat = Join-Path $publicDesktop "Test Android SDK.bat"
+          @"
+@echo off
+echo ============================================================
+echo           ANDROID ENVIRONMENT VERIFICATION
+echo ============================================================
+echo.
+echo ANDROID_HOME     : %ANDROID_HOME%
+echo ANDROID_SDK_ROOT : %ANDROID_SDK_ROOT%
+echo JAVA_HOME        : %JAVA_HOME%
+echo.
+echo --- Testing ADB (platform-tools) ---
+adb version
+echo.
+echo --- Testing SDK Manager ---
+call sdkmanager --version
+echo.
+echo --- Testing Java ---
+java -version
+echo.
+echo ============================================================
+echo If all tools above showed versions, setup is 100%% complete!
+echo ============================================================
+pause
+"@ | Set-Content -Path $testBat -Force -Encoding ASCII
+
+          Write-Host "Created desktop verification utility at: $testBat"
+
+          # Re-apply ACLs to ensure RDP user has full permissions everywhere in C:\Android
+          icacls "C:\Android" /grant "Everyone:(OI)(CI)F" /T /Q | Out-Null
+          icacls "C:\Android" /grant "Users:(OI)(CI)F" /T /Q | Out-Null
+
           Write-Host ""
           Write-Host "======================================"
           Write-Host " Android SDK configured successfully"
           Write-Host "======================================"
           Write-Host "SDK: $sdkPath"
+          Write-Host "ADB Version:"
+          & "$platformTools\adb.exe" --version
       # ============================================================
       # 7. VERIFY RDP SERVICE
       # ============================================================
@@ -515,12 +697,14 @@ jobs:
           ) | Where-Object { Test-Path $_ } | Select-Object -First 1
           if ($studioPath) {
               Write-Host ""
-              Write-Host "Android Studio executable:"
-              Write-Host $studioPath
+              Write-Host "Android Studio executable: $studioPath"
           }
           Write-Host ""
-          Write-Host "Android SDK:"
-          Write-Host $env:ANDROID_HOME
+          Write-Host "Android SDK   : $env:ANDROID_HOME"
+          Write-Host "Java Runtime  : $env:JAVA_HOME"
+          if (Test-Path "$env:ANDROID_HOME\platform-tools\adb.exe") {
+              Write-Host "ADB Tool      : $env:ANDROID_HOME\platform-tools\adb.exe"
+          }
           Write-Host ""
           Write-Host "Checking RDP service..."
           Get-Service TermService |
